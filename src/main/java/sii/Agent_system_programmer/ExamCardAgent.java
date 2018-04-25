@@ -1,0 +1,656 @@
+package sii.Agent_system_programmer;
+
+import java.io.BufferedReader;
+import java.io.FileInputStream;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.HashSet;
+
+import jade.core.AID;
+import jade.core.Agent;
+import jade.core.behaviours.Behaviour;
+import jade.core.behaviours.CyclicBehaviour;
+import jade.core.behaviours.TickerBehaviour;
+import jade.domain.DFService;
+import jade.domain.FIPAException;
+import jade.domain.FIPAAgentManagement.DFAgentDescription;
+import jade.domain.FIPAAgentManagement.ServiceDescription;
+import jade.lang.acl.ACLMessage;
+import jade.lang.acl.MessageTemplate;
+
+@SuppressWarnings("serial")
+public class ExamCardAgent extends Agent
+{
+    private Question firstQuestion;
+    private Question secondQuestion;
+    public double average = 0;
+    boolean isChanged = false;
+    
+    HashSet<AID> simpleCards;
+    boolean isPrinted = false;
+    
+    int count_do = 0;
+    int count_agents=0;
+    
+    protected void setup()
+    {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream("cards.txt"), "utf-8"))) {
+            String currentLine; 
+            if ((currentLine = reader.readLine()) != null) 
+            {
+            	count_agents = Integer.parseInt(currentLine.trim());
+            }
+        } catch (Exception ex)
+        {
+        } 
+    	
+    	
+        DFAgentDescription dfd = new DFAgentDescription();
+        dfd.setName(getAID());
+        ServiceDescription sd = new ServiceDescription();
+        sd.setType("card");
+        sd.setName("MyCard");
+        dfd.addServices(sd);
+        try
+        {
+            DFService.register(this, dfd);
+        } catch (FIPAException fe)
+        {
+            fe.printStackTrace();
+        }
+        addBehaviour(new QuestionRequester(this, 3000));
+        addBehaviour(new Exchanger(this,3000));
+        System.out.println(this.getLocalName() + " создан");
+    }
+    
+    private class QuestionRequester extends TickerBehaviour
+    {
+        
+        boolean isSendMsgToManager = false;
+        private HashSet<AID> questionAgents;
+        
+        public QuestionRequester(Agent a, long period)
+        {
+            super(a, period);
+        }
+        
+        @Override
+        public void onTick()
+        {
+            if (isSendMsgToManager)
+            {
+                return;
+            }
+            if (firstQuestion != null && secondQuestion != null && !isSendMsgToManager)
+            {
+                
+                System.out.println("Программист готов - " + this.myAgent.getLocalName() + ": " + firstQuestion.toString() + " : " + secondQuestion.toString());
+                AID manager = null;
+                DFAgentDescription template = new DFAgentDescription();
+                ServiceDescription sd = new ServiceDescription();
+                sd.setType("manager");
+                template.addServices(sd);
+                try
+                {
+                    DFAgentDescription[] result = DFService.search(myAgent, template);
+                    if (result.length != 0)
+                    {
+                        manager = result[0].getName();
+                    } else
+                    {
+                        return;
+                    }
+                } catch (FIPAException fe)
+                {
+                    fe.printStackTrace();
+                }
+                ACLMessage message = new ACLMessage(ACLMessage.INFORM);
+                message.addReceiver(manager);
+                message.setContent("" + (firstQuestion.complexity + secondQuestion.complexity));
+                message.setReplyWith("готов" + System.currentTimeMillis());
+                myAgent.send(message);
+                block();
+                isSendMsgToManager = true;
+                return;
+            }
+            DFAgentDescription template = new DFAgentDescription();
+            ServiceDescription sd = new ServiceDescription();
+            sd.setType("question");
+            template.addServices(sd);
+            try
+            {
+                DFAgentDescription[] result = DFService.search(myAgent, template);
+                questionAgents = new HashSet<AID>();
+                for (int i = 0; i < result.length; ++i)
+                {
+                    questionAgents.add(result[i].getName());
+                }
+            } catch (FIPAException fe)
+            {
+                fe.printStackTrace();
+            }
+            ACLMessage message = new ACLMessage(ACLMessage.REQUEST);
+            for (AID aid : questionAgents)
+            {
+                message.addReceiver(aid);
+            }
+            message.setContent("Дай себя");
+            message.setReplyWith("request" + System.currentTimeMillis());
+            myAgent.send(message);
+            myAgent.addBehaviour(new QuestionPicker()); 
+        }
+        
+        private class QuestionPicker extends Behaviour //принимает сообщения от вопросов, которые готовы "отдать" себя, и проверяет, можно ли взять вопрос в билет
+        {
+            
+            int step = 0;
+            ACLMessage msg;
+            MessageTemplate mt;
+            
+            @Override
+            public void action()
+            {
+                switch (step)
+                {
+                    case 0:
+                        mt = MessageTemplate.MatchPerformative(ACLMessage.PROPOSE);
+                        msg = myAgent.receive(mt);
+                        
+                        if (msg != null)
+                        {
+                            if (firstQuestion == null)
+                            {
+                                ACLMessage reply = msg.createReply();
+                                reply.setPerformative(ACLMessage.ACCEPT_PROPOSAL);
+                                reply.setContent("Беру");
+                                myAgent.send(reply);
+                                step = 1;
+                                
+                            } else if (secondQuestion == null)
+                            {
+                                Question q = new Question(msg.getContent());
+                                if (!firstQuestion.theme.equals(q.theme))
+                                {
+                                    ACLMessage reply = msg.createReply();
+                                    reply.setPerformative(ACLMessage.ACCEPT_PROPOSAL);
+                                    reply.setContent("Беру");
+                                    myAgent.send(reply);
+                                    step = 2; 
+                                }
+                            }
+                        } else
+                        {
+                            block();
+                        }
+                        break;
+                    case 1:
+                        mt = MessageTemplate.or(MessageTemplate.MatchPerformative(ACLMessage.AGREE), MessageTemplate.MatchPerformative(ACLMessage.REFUSE));
+                        msg = myAgent.receive(mt);
+                        
+                        if (msg != null)
+                        {
+                            if (msg.getPerformative() == ACLMessage.AGREE)
+                            {
+                                if (firstQuestion == null)
+                                {
+                                    firstQuestion = new Question(msg.getContent());
+                                    System.out.println("Программист " + myAgent.getLocalName() + " выбрал задачу " + msg.getSender().getLocalName() + " - " + firstQuestion.toString());
+                                    step = 0;
+                                }
+                            }
+                            if (msg.getPerformative() == ACLMessage.REFUSE)
+                            {
+                                firstQuestion = null;
+                                step = 0;
+                                
+                            }
+                        } else
+                        {
+                            block();
+                        }
+                        break;
+                    case 2:
+                        mt = MessageTemplate.or(MessageTemplate.MatchPerformative(ACLMessage.AGREE), MessageTemplate.MatchPerformative(ACLMessage.REFUSE));
+                        msg = myAgent.receive(mt);
+                        
+                        if (msg != null)
+                        {
+                            if (msg.getPerformative() == ACLMessage.AGREE)
+                            {
+                                if (secondQuestion == null && !firstQuestion.theme.equals((new Question(msg.getContent())).theme))
+                                {
+                                    secondQuestion = new Question(msg.getContent());
+                                    System.out.println("Программист " + myAgent.getLocalName() + " выбрал задачу " + msg.getSender().getLocalName() + " - " + secondQuestion.toString());
+                                    step = 0;
+                                }
+                                else
+                                {
+                                    secondQuestion = null;
+                                    step = 0;
+                                    ACLMessage reply = msg.createReply();
+                                    reply.setPerformative(ACLMessage.CANCEL);
+                                    reply.setContent("Отмена");
+                                    myAgent.send(reply);
+                                }
+                            }
+                            if (msg.getPerformative() == ACLMessage.REFUSE)
+                            {
+                                secondQuestion = null;
+                                step = 0;
+                            }
+                        } else
+                        {
+                            block();
+                        }
+                }
+            }
+            
+            @Override
+            public boolean done()
+            {
+                return (step == 1 && firstQuestion != null) || (step == 2 && secondQuestion != null);
+                
+            }
+        }
+    }
+    
+    private class Exchanger extends TickerBehaviour
+    {
+        
+        int step;
+        boolean isInitiator = false;
+        MessageTemplate mt;
+        ACLMessage msg;
+        @SuppressWarnings("unused")
+		boolean isChanged = false;
+        @SuppressWarnings("unused")
+		int countOfNotAnsweredSimples = 0;
+        
+        public Exchanger(Agent a, long period)
+        {
+            super(a, period);
+            step = 0;
+        }
+        
+        @Override
+        protected void onTick()
+        { 
+            switch (step)
+            {
+                case 0:
+                    mt = MessageTemplate.MatchPerformative(ACLMessage.INFORM); //принимаем от менеджера сообщение о том, какая средняя сложность билета
+                    msg = myAgent.receive(mt);
+                    
+                    if (msg != null)
+                    {
+                        average = Double.parseDouble(msg.getContent());
+                        if (firstQuestion.complexity + secondQuestion.complexity > average)
+                        {
+                            isInitiator = true;
+                        }
+                        
+                        try
+                        {
+                            DFService.deregister(this.myAgent);
+                        } catch (FIPAException fe)
+                        {
+                            fe.printStackTrace();
+                        }
+                        //в зависимости от средней сложности меняем сервис билета - Initiator если > average, simple - если <average
+                        DFAgentDescription dfd = new DFAgentDescription();
+                        dfd.setName(getAID());
+                        ServiceDescription sd = new ServiceDescription();
+                        sd.setType(isInitiator ? "initiator" : "simple");
+                        sd.setName("MyCard");
+                        dfd.addServices(sd);
+                        try
+                        {
+                            DFService.register(this.myAgent, dfd);
+                        } catch (FIPAException fe)
+                        {
+                            fe.printStackTrace();
+                        } 
+                        //отправляем менеджеру сообщение, что поменяли сервис
+                        ACLMessage reply = msg.createReply();
+                        reply.setPerformative(ACLMessage.CONFIRM);
+                        reply.setContent("Я поменял сервис");
+                        myAgent.send(reply);
+                        
+                        step = 1;
+                    } else
+                    {
+                        block();
+                    }
+                    break;
+                case 1:
+                    mt = MessageTemplate.MatchPerformative(ACLMessage.CONFIRM);
+                    msg = myAgent.receive(mt);
+                    
+                    if (msg != null)
+                    {
+                        if (msg.getContent().equals("Начинаем обмен!"))
+                        {
+                            if (isInitiator)
+                            {
+                                myAgent.addBehaviour(new InitiatorRequester(this.myAgent, 1000));
+                            } else
+                            {
+                                myAgent.addBehaviour(new SimpleBehaviour());
+                            }
+                            ((ExamCardAgent) myAgent).average = average; 
+                        }
+                    } else
+                    {
+                        block();
+                    }
+                    break;
+            }
+        } 
+    }
+    
+    private class InitiatorRequester extends TickerBehaviour
+    {
+        int step = 0;
+        
+        public InitiatorRequester(Agent a, long period)
+        {
+            super(a, period);
+            simpleCards = new HashSet<>();
+        }
+        
+        @Override
+        protected void onTick()
+        { 
+            switch (step)
+            {
+                case 0:
+                    //отправляем всем simple-билетам свои вопросы
+                    DFAgentDescription template = new DFAgentDescription();
+                    ServiceDescription sd = new ServiceDescription();
+                    sd.setType("simple");
+                    template.addServices(sd);
+                    try
+                    {
+                        DFAgentDescription[] result = DFService.search(myAgent, template); 
+                        for (DFAgentDescription card : result)
+                        {
+                            simpleCards.add(card.getName());
+                        }
+                    } catch (FIPAException fe)
+                    {
+                        fe.printStackTrace();
+                    }
+                    ACLMessage message = new ACLMessage(ACLMessage.REQUEST);
+                    for (AID card : simpleCards)
+                    {
+                        message.addReceiver(card);
+                    }
+                    message.setContent("Дай свои задачи");
+                    message.setReplyWith("request" + System.currentTimeMillis());
+                    message.setLanguage("1");
+                    myAgent.send(message);
+                    myAgent.addBehaviour(new InitiatorBehaviour());
+            }
+        }
+
+    }
+    
+    private class InitiatorBehaviour extends Behaviour
+    {
+
+        int step = 1;
+        ACLMessage msg;
+        MessageTemplate mt;
+        MessageTemplate mtl = MessageTemplate.MatchLanguage("1");
+        
+        @SuppressWarnings("unused")
+		@Override
+        public void action()
+        {
+            if (isPrinted)
+                return;
+            if (simpleCards.size() <= 0 &&!isPrinted) 
+                step=3;
+            switch (step)
+            {
+                case 1:
+                    if (!isChanged)
+                    {
+                    mt = MessageTemplate.and(mtl,MessageTemplate.MatchPerformative(ACLMessage.PROPOSE));
+                    msg = myAgent.receive(mt);
+                    if (msg != null)
+                    {
+                        System.out.println(myAgent.getLocalName() + " получил задачи от " + msg.getSender().getLocalName());
+                        String[] split = msg.getContent().split(":");
+                        if (split.length != 2)
+                        {
+                            int k = 0;
+                            k++;
+                            System.err.println(msg.getSender().getLocalName());
+                        }
+                        Question q1 = new Question(split[0]);
+                        Question q2 = new Question(split[1]);
+                        Question[] qs = new Question[]
+                        {
+                            q1, q2, firstQuestion, secondQuestion
+                        };
+                        int sum1 = qs[0].complexity + qs[1].complexity;
+                        int sum2 = qs[2].complexity + qs[3].complexity;
+                        
+                        boolean rez1 = check(qs[0], qs[2], qs[1], qs[3], sum1, sum2);
+                        boolean rez2 = check(qs[1], qs[2], qs[0], qs[3], sum1, sum2);
+                        if (rez1 || rez2) 
+                        { //есть хорошие варианты обмена
+                           ACLMessage reply = msg.createReply();
+                            reply.setPerformative(ACLMessage.ACCEPT_PROPOSAL);
+                            if (rez1)
+                                reply.setContent(qs[0].toString() + ":" + qs[2].toString() + ":" + qs[1].toString() + ":" + qs[3].toString());
+                            else 
+                                reply.setContent(qs[1].toString() + ":" + qs[2].toString() + ":" + qs[0].toString() + ":" + qs[3].toString());
+                            reply.setLanguage("1");
+                            myAgent.send(reply);
+                             step = 2;
+                            System.out.println(myAgent.getLocalName() + " предложил поменяться " + msg.getSender().getLocalName());
+                        }else {
+                            System.out.println("У " + myAgent.getLocalName() + " нет хороших вариантов обмена с " + msg.getSender().getLocalName());
+                            simpleCards.remove(msg.getSender());
+                            if (simpleCards.size() <= 0) //если нам ответили все simple-билеты
+                            {
+                                step = 3;
+                            }
+                        }
+                    } else
+                    {
+                        block();
+                    }
+                    }
+                    break;
+                case 2:
+                    mt = MessageTemplate.and(mtl,MessageTemplate.or(MessageTemplate.MatchPerformative(ACLMessage.REFUSE), MessageTemplate.MatchPerformative(ACLMessage.AGREE)));
+                    msg = myAgent.receive(mt);
+                    if (msg != null)
+                    { 
+                        if (msg.getPerformative() == ACLMessage.AGREE)
+                        {
+                            System.out.println(msg.getContent());
+                            String[] split = msg.getContent().split(":");
+                            firstQuestion = new Question(split[0]);
+                            secondQuestion = new Question(split[1]);
+                            System.out.println(myAgent.getLocalName() + " поменялся с " + msg.getSender().getLocalName());
+                        }
+                        if (msg.getPerformative() == ACLMessage.REFUSE)
+                        {
+                            System.out.println(myAgent.getLocalName() + " отказал в обмене " + msg.getSender().getLocalName()); 
+                            count_do++;
+                        }
+                           step = 1;
+                        //похоже условие ниже никогда не выполняется
+                        if (simpleCards.size() <= 0) //если нам ответили все simple-билеты 
+                            step = 3;
+                        
+                        if (count_do>count_agents+3) {
+                        	step=3; 
+                        }
+                        
+                    } else
+                    {
+                        block();
+                    }
+                    break;
+                case 3:
+                    AID manager = null;
+                    DFAgentDescription template = new DFAgentDescription();
+                    ServiceDescription sd = new ServiceDescription();
+                    sd.setType("manager");
+                    template.addServices(sd);
+                    try
+                    {
+                        DFAgentDescription[] result = DFService.search(myAgent, template);
+                        if (result.length != 0)
+                        {
+                            manager = result[0].getName();
+                        } else
+                        {
+                            return;
+                        }
+                    } catch (FIPAException fe)
+                    {
+                        fe.printStackTrace();
+                    }
+                    ACLMessage message = new ACLMessage(ACLMessage.INFORM_REF);
+                    message.addReceiver(manager);
+                    message.setContent("Обмен закончен");
+                    message.setReplyWith("ready" + System.currentTimeMillis());
+                    myAgent.send(message);
+                    step = 4;
+                    break;
+                case 4:
+                    mt = MessageTemplate.and(MessageTemplate.MatchLanguage("1"), MessageTemplate.MatchPerformative(ACLMessage.PROPAGATE));
+                    msg = myAgent.receive(mt);
+                    if (msg != null && !isPrinted) 
+                    {
+                        int sum = firstQuestion.complexity + secondQuestion.complexity;
+                        System.out.println("Программист " + myAgent.getLocalName() + " готов: " + ((ExamCardAgent)myAgent).firstQuestion.toString() + ", " + ((ExamCardAgent)myAgent).secondQuestion.toString() + " Сложность=" + sum);
+                        isPrinted = true;
+                        
+                        try(FileWriter writer = new FileWriter("results.txt", true))
+                        {
+                           // запись всей строки
+                            String text = "Программист " + myAgent.getLocalName() + " готов: " + ((ExamCardAgent)myAgent).firstQuestion.toString() + ", " + ((ExamCardAgent)myAgent).secondQuestion.toString() + " Сложность=" + sum;
+                            writer.append(text + "\n"); 
+                            writer.flush();
+                        }
+                        catch(IOException ex){
+                             
+                            System.out.println(ex.getMessage());
+                        }  
+                        step = 5;
+                    }
+                    break;
+                    
+            }
+        }
+        
+        @Override
+        public boolean done()
+        {
+            if (step == 5)
+            {
+                return true;
+            }
+            return false;
+        }
+        
+
+        boolean check(Question q11, Question q12, Question q21, Question q22, int s1, int s2) 
+        {
+           if (!q11.theme.equals(q12.theme) && !q21.theme.equals(q22.theme))
+            {
+        	   
+                int sum11 = q11.complexity + q12.complexity;
+                int sum22 = q21.complexity + q22.complexity;
+                
+                if(Math.abs(sum11 - average) <= Math.abs(s1 - average) && Math.abs(sum22 - average) <= Math.abs(s2 - average))
+                {
+                    return true;
+               }
+            }
+            return false;
+        }
+        
+    }
+    
+    private class SimpleBehaviour extends CyclicBehaviour
+    {
+        
+        ACLMessage msg;
+        boolean isChanged = false;
+        
+        @Override
+        public void action()
+        {
+        	  
+
+        	
+            msg = myAgent.receive(MessageTemplate.MatchLanguage("1"));
+            if (msg != null)
+            {
+                
+                if (msg.getPerformative() == ACLMessage.REQUEST)
+                {
+                    ACLMessage reply = msg.createReply();
+                    reply.setPerformative(ACLMessage.PROPOSE);
+                    reply.setContent(firstQuestion.toString() + ":" + secondQuestion.toString());
+                    myAgent.send(reply);
+                } else if (msg.getPerformative() == ACLMessage.ACCEPT_PROPOSAL && !isChanged)
+                {
+                    isChanged = true;
+                    String[] split = msg.getContent().split(":");
+                    firstQuestion = new Question(split[0]);
+                    secondQuestion = new Question(split[1]);
+                    ACLMessage reply = msg.createReply();
+                    reply.setContent(split[2] + ":" + split[3]);
+                    reply.setPerformative(ACLMessage.AGREE);
+                    reply.setLanguage("1");
+                    myAgent.send(reply);
+                    System.out.println(myAgent.getLocalName() + " согласен меняться с " + msg.getSender().getLocalName());
+                    
+                } else if (msg.getPerformative() == ACLMessage.ACCEPT_PROPOSAL && isChanged)
+                {
+                    ACLMessage reply = msg.createReply();
+                    reply.setPerformative(ACLMessage.REFUSE);
+                    reply.setContent("У моих вопросов уже нормальная сложность");
+                    reply.setLanguage("1");
+                    myAgent.send(reply);
+                    System.out.println(myAgent.getLocalName() + " НЕ согласен меняться с " + msg.getSender().getLocalName());
+                    
+                }
+                if (msg.getPerformative() == ACLMessage.PROPAGATE)
+                {
+                    int sum = firstQuestion.complexity + secondQuestion.complexity;
+                    System.out.println("Программист " + myAgent.getLocalName() + " готов: " + ((ExamCardAgent)myAgent).firstQuestion.toString() + ", " + ((ExamCardAgent)myAgent).secondQuestion.toString() + " Сложность=" + sum);
+                    
+                    
+                    try(FileWriter writer = new FileWriter("results.txt", true))
+                    {
+                       // запись всей строки
+                        String text = "Программист " + myAgent.getLocalName() + " готов: " + ((ExamCardAgent)myAgent).firstQuestion.toString() + ", " + ((ExamCardAgent)myAgent).secondQuestion.toString() + " Сложность=" + sum;
+                        writer.append(text + "\n"); 
+                        writer.flush();
+                    }
+                    catch(IOException ex){
+                         
+                        System.out.println(ex.getMessage());
+                    } 
+                    
+                    
+                }
+            } else
+            {
+                block();
+            }
+        }
+        
+    }
+}
