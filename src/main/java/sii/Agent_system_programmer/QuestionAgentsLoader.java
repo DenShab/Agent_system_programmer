@@ -18,7 +18,7 @@ public class QuestionAgentsLoader extends Agent {
     protected void setup() {
         // QuestionAgent creation
         int lineCount = 0;
-        int rand = (new Random()).nextInt()%100000;
+        int rand = (new Random()).nextInt()%100;
         System.out.println(" Test " );
         
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream("questions.txt"), "utf-8"))){
